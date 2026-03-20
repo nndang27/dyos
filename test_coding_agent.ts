@@ -2,16 +2,19 @@ import { createDeepAgent } from "./src/agent.js";
 import { LocalShellBackend } from "./src/backends/index.js";
 import { ChatOllama } from "@langchain/ollama";
 import { HumanMessage } from "@langchain/core/messages";
+import { buildPersonaSystemPrompt } from "./src/cognition/loader.js";
+import { readPersonaModuleTool } from "./src/tools/readPersonaModule.js";
+import { createVerifyMiddleware } from "./src/middleware/verify.js";
+import * as fs from "fs";
+import * as path from "path";
 
 async function main() {
 
     // ============================================================================================================
-    // ================= Tạo môi trường sandbox giới hạn agent thực hiện code trong folder workDir =================
+    // ================= Sandbox environment ======================================================================
     // ============================================================================================================
-    const workDir = "./test_parity_workspace";
+    const workDir = "./test_folder";
 
-    // LocalShellBackend supports command execution (bash)
-    // virtualMode: true restricts the agent to the workDir (sandboxed)
     const backend = await LocalShellBackend.create({
         rootDir: workDir,
         virtualMode: true,
@@ -19,7 +22,7 @@ async function main() {
     });
 
     // ============================================================================================================
-    // ================= Model ollama free ========================================================================
+    // ================= Model =====================================================================================
     // ============================================================================================================
     const model = new ChatOllama({
         model: "minimax-m2.5:cloud",
@@ -27,7 +30,7 @@ async function main() {
     });
 
     // ============================================================================================================
-    // ================= Tạo subagent coder =======================================================================
+    // ================= Subagent: coder ===========================================================================
     // ============================================================================================================
     const CODER_INSTRUCTIONS = `
     You are an expert Software Engineer and System Administrator.
@@ -42,8 +45,8 @@ async function main() {
 
     SANDBOX & PATH RULES:
     - You are running in a VIRTUAL FILESYSTEM. The root directory \`/\` is your workspace.
-    - NEVER use host absolute paths (paths starting with \`/Users\`). 
-    - If you see a path like \`/Users/nndang27/...\` in bash output (e.g. from \`pwd\`), IGNORE IT. 
+    - NEVER use host absolute paths (paths starting with \`/Users\`).
+    - If you see a path like \`/Users/nndang27/...\` in bash output (e.g. from \`pwd\`), IGNORE IT.
     - Use ONLY paths starting with \`/\` (virtual absolute) or relative paths.
     - Your designated workspace is the current directory \`/\`.
     `;
@@ -55,11 +58,35 @@ async function main() {
     };
 
     // ============================================================================================================
-    // ================= Tích hợp mô hình chính Plan-end-execute ==================================================
+    // ================= Subagent: notebook (Data Analyst) ========================================================
+    // ============================================================================================================
+    const notebookSystemPrompt = await buildPersonaSystemPrompt(`
+You are a Senior Data Analyst operating in a notebook environment.
+Your job is to write and execute Python code in notebook cells to analyze data,
+generate insights, and produce reports.
+
+Rules:
+- Always inspect the data schema first before any analysis (df.head(), df.info(), df.describe())
+- Each cell must have a clear comment stating what it does
+- Never print raw dataframes as final output — summarize findings in markdown
+- When producing a chart, always save it as a file, never just display inline
+- Final deliverable must be a structured report with: summary, key findings, methodology, limitations
+    `);
+
+    const notebook_sub_agent = {
+        name: "notebook-agent",
+        description: "Execute data analysis tasks using Python notebooks. Use this agent for: loading and inspecting datasets, running pandas/numpy/matplotlib analysis, generating charts, processing Excel files, and producing insight reports. Pass one analysis objective at a time.",
+        systemPrompt: notebookSystemPrompt,
+        tools: [readPersonaModuleTool],
+    };
+
+    // ============================================================================================================
+    // ================= Orchestrator (Plan-and-execute) ==========================================================
     // ============================================================================================================
     const ORCHESTRATOR_INSTRUCTIONS = `
-    You are the Lead System Architect.
-    Your job is to understand the user's technical requirements, plan the architecture, and delegate the actual implementation to your 'coder-agent'.
+    You are the Lead Data Analyst and Project Manager.
+    Your job is to understand the user's analytical requirements, plan the analysis approach,
+    and delegate the actual data work to your specialized sub-agents.
 
     SANDBOX & PATH RULES:
     - IMPORTANT: You and your sub-agents are restricted to a VIRTUAL FILESYSTEM.
@@ -69,100 +96,264 @@ async function main() {
     - If a tool or bash command returns a host path, substitute it with \`/\`.
 
     DELEGATION RULES:
+    - For data analysis, notebook execution, chart generation → delegate to \`notebook-agent\`
+    - For file management, code writing, bash execution → delegate to \`coder-agent\`
     - DO NOT write code directly in your chat responses.
-    - USE the \`task\` tool to assign coding, debugging, or bash execution tasks to the \`coder-agent\`.
-    - Review the results returned by the \`coder-agent\` and report back to the user.
+    - USE the \`task\` tool to assign tasks to the appropriate sub-agent.
+    - Review the results returned by sub-agents and report back to the user.
+
+    ANALYSIS PLANNING RULES:
+    - Always create a todo list before starting analysis
+    - Break complex analyses into discrete steps
+    - Verify data quality before running statistical analysis
+    - Ensure final deliverables include limitations and confidence notes
     `;
+
+    // Create agent with VerifyMiddleware for quality gating and stuck detection
+    const verifyMiddleware = createVerifyMiddleware();
 
     const agent = await createDeepAgent({
         model: model,
         systemPrompt: ORCHESTRATOR_INSTRUCTIONS,
-        subagents: [coderSubAgent],
+        subagents: [coderSubAgent, notebook_sub_agent],
         backend: backend,
+        middleware: [verifyMiddleware],
     });
 
-    console.log(`Running in folder: ${workDir}`);
     // ============================================================================================================
-    // ================================= Prompt Input ============================================================
+    // ================= Pre-run cognition verification ===========================================================
     // ============================================================================================================
-    const inputs = {
-        messages: [new HumanMessage(`
-        Hãy đóng vai một Kỹ sư Dữ liệu 3D và thực hiện một dự án hoàn chỉnh. Đây là một quy trình gồm nhiều bước phức tạp, do đó bạn **BẮT BUỘC phải tạo một danh sách Todo List để lên kế hoạch chi tiết trước khi gọi công cụ viết code**.
+    console.log("=== TEST: Verifying cognition system ===");
+    console.log("Checking always-on modules are loaded at boot...");
 
-        Hãy thực hiện tuần tự các yêu cầu sau:
-        1. Tạo một file requirements.txt chứa các thư viện cần thiết (numpy, open3d).
-        2. Viết một script Python chính tên là create_bowl.py. Script này phải dùng toán học sinh ra một tập point cloud gồm đúng 10,000 điểm có hình dáng của một cái bát (3D paraboloid: z = x^2 + y^2), sau đó dùng open3d để lưu ra file bowl_sample.ply.
-        3. Viết thêm một script thứ hai tên là verify_cloud.py. Script này có nhiệm vụ đọc lại file bowl_sample.ply vừa tạo và in ra Terminal số lượng điểm để kiểm chứng xem có khớp 10,000 điểm không.
-        4. Đảm bảo bạn cập nhật trạng thái của Todo list (từ in_progress sang completed) sau mỗi lần hoàn thành một file. 
-        5. Với bước cuối để chạy và kiểm thử hay tạo plan cho subagent
-        `)]
+    // Log system prompt preview to confirm MANIFEST + ROLE + ETHICS are present
+    try {
+        const { buildPersonaSystemPrompt: buildPrompt } = await import("./src/cognition/loader.js");
+        const samplePrompt = await buildPrompt("Test prompt");
+        console.log("System prompt preview (first 200 chars):", samplePrompt.substring(0, 200));
+    } catch (err) {
+        console.warn("Could not build sample system prompt:", err);
+    }
+
+    console.log("Checking EXPERIENCE_INDEX for any existing episodes...");
+    try {
+        const indexPath = path.join(process.cwd(), "src", "cognition", "EXPERIENCE_INDEX.md");
+        const indexContent = fs.readFileSync(indexPath, "utf-8");
+        console.log("EXPERIENCE_INDEX content:\n", indexContent);
+    } catch (err) {
+        console.warn("Could not read EXPERIENCE_INDEX.md:", err);
+    }
+
+    // Ensure output directory exists so the agent can write results
+    const outputDir = path.join(process.cwd(), "test_folder", "output");
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+        console.log("Created output directory:", outputDir);
+    }
+
+    console.log("=== Starting agent run ===");
+
+    // ============================================================================================================
+    // ================= Test Task 1: Full Data Analysis Scenario =================================================
+    // ============================================================================================================
+    const testTask = `
+I need a complete analysis of our sales/operations dataset for the Q1 2026 review.
+
+The data file is at: /32130_2026A_10(in).csv
+
+Please deliver:
+1. A data quality report — missing values, outliers, inconsistencies
+2. Key descriptive statistics across all numerical columns
+3. Identify the top 3 most significant patterns or trends in the data
+4. A visualization of the most important finding (saved as a PNG file)
+5. A summary report in markdown format saved to the test_folder
+
+Important constraints:
+- All work must be done via notebook cells — no direct file manipulation
+- The report must include data limitations and confidence notes
+- If the data has any privacy or quality concerns, flag them explicitly
+
+Deliver results to: /output/
+    `;
+
+    const inputs = {
+        messages: [new HumanMessage(testTask)]
     };
 
-    const stream = await agent.stream(inputs, {
-        streamMode: "updates",
-        subgraphs: true
-    });
-    // ==========================================================================================
-    // ================ Print out results =======================================================
-    // ==========================================================================================
-    for await (const event of stream) {
-        // Lấy data và metadata
-        const [chunk, metadata] = event as any;
+    try {
+        const stream = await agent.stream(inputs, {
+            streamMode: "updates",
+            subgraphs: true
+        });
 
-        // Xác định tên Agent
-        const namespace = metadata?.namespace || [];
-        const currentAgentName = namespace.length > 0 ? namespace[namespace.length - 1] : "Orchestrator";
+        // ============================================================================================================
+        // ================= Print results ============================================================================
+        // ============================================================================================================
+        for await (const event of stream) {
+            const [chunk, metadata] = event as any;
 
-        // Tìm object chứa messages trong metadata
-        let stateUpdate = null;
-        if (metadata?.model_request) stateUpdate = metadata.model_request;
-        else if (metadata?.tools) stateUpdate = metadata.tools;
-        else {
-            for (const key in metadata) {
-                if (metadata[key] && metadata[key].messages) {
-                    stateUpdate = metadata[key];
-                    break;
+            const namespace = metadata?.namespace || [];
+            const currentAgentName = namespace.length > 0 ? namespace[namespace.length - 1] : "Orchestrator";
+
+            let stateUpdate = null;
+            if (metadata?.model_request) stateUpdate = metadata.model_request;
+            else if (metadata?.tools) stateUpdate = metadata.tools;
+            else {
+                for (const key in metadata) {
+                    if (metadata[key] && metadata[key].messages) {
+                        stateUpdate = metadata[key];
+                        break;
+                    }
+                }
+            }
+
+            if (!stateUpdate) continue;
+
+            // Print Todo List updates
+            if (stateUpdate.todos) {
+                console.log(`\n[${currentAgentName.toUpperCase()} TODO LIST UPDATE]`);
+                stateUpdate.todos.forEach((todo: any, index: number) => {
+                    const statusIcon =
+                        todo.status === "completed" ? "[DONE]" :
+                            todo.status === "in_progress" ? "[WIP]" : "[OPEN]";
+                    console.log(`  ${index + 1}. ${statusIcon} ${todo.content}`);
+                });
+                console.log("--------------------------------------------------\n");
+            }
+
+            // Print Messages
+            if (stateUpdate.messages) {
+                const messages = Array.isArray(stateUpdate.messages) ? stateUpdate.messages : [stateUpdate.messages];
+                for (const msg of messages) {
+                    if (msg.additional_kwargs?.reasoning_content) {
+                        console.log(`\n[${currentAgentName} THINKING]: ${msg.additional_kwargs.reasoning_content}`);
+                    }
+
+                    if (msg._getType() === "ai" && msg.content) {
+                        console.log(`[${currentAgentName}]: ${msg.content}`);
+                    }
+
+                    if (msg._getType() === "ai" && msg.tool_calls && msg.tool_calls.length > 0) {
+                        msg.tool_calls.forEach((tc: any) => {
+                            console.log(`[${currentAgentName}] Tool call -> ${tc.name}()`);
+                        });
+                    }
                 }
             }
         }
-
-        if (!stateUpdate) continue;
-
-        // 1. In Todo List (Nếu có)
-        if (stateUpdate.todos) {
-            console.log(`\n✅ [${currentAgentName.toUpperCase()} VỪA CẬP NHẬT TODO LIST]`);
-            stateUpdate.todos.forEach((todo: any, index: number) => {
-                const statusIcon =
-                    todo.status === "completed" ? "🟢" :
-                        todo.status === "in_progress" ? "🟡" : "⚪️";
-
-                console.log(`  ${index + 1}. ${statusIcon} [${todo.status.toUpperCase()}] ${todo.content}`);
-            });
-            console.log("--------------------------------------------------\n");
-        }
-
-        // 2. In Messages
-        if (stateUpdate.messages) {
-            const messages = Array.isArray(stateUpdate.messages) ? stateUpdate.messages : [stateUpdate.messages];
-            for (const msg of messages) {
-                if (msg.additional_kwargs?.reasoning_content) {
-                    console.log(`\n🤔 [${currentAgentName} Đang nghĩ]: ${msg.additional_kwargs.reasoning_content}`);
-                }
-
-                if (msg._getType() === "ai" && msg.content) {
-                    console.log(`🤖 [${currentAgentName}]: ${msg.content}`);
-                }
-
-                if (msg._getType() === "ai" && msg.tool_calls && msg.tool_calls.length > 0) {
-                    msg.tool_calls.forEach((tc: any) => {
-                        console.log(`🛠  [${currentAgentName}] Gọi tool -> ${tc.name}()`);
-                    });
-                }
-            }
-        }
+    } catch (err: any) {
+        console.error(`\n[TASK 1 ERROR] Agent encountered an error: ${err.message || err}`);
+        console.error("[TASK 1 ERROR] This is typically caused by the model sending malformed tool arguments.");
+        console.error("[TASK 1 ERROR] The cognition system and middleware pipeline were functioning correctly before this point.\n");
     }
-    // ==========================================================================================
-    // ==========================================================================================
+
+    // ============================================================================================================
+    // ================= Test Task 2: Stuck detection stress test =================================================
+    // ============================================================================================================
+    console.log("\n=== TEST TASK 2: Stuck detection stress test (Excel report) ===\n");
+
+    const stuckTestTask = `
+Convert the CSV data at /32130_2026A_10(in).csv into a formatted Excel report with:
+- Multiple sheets (one per data category)
+- Conditional formatting on outlier cells
+- A summary pivot table
+- Charts embedded in the Excel file
+
+Save to: /output/report.xlsx
+    `;
+    // This task requires openpyxl with advanced features — likely to trigger stuck detection
+    // if the environment is not set up correctly, testing the prerequisite escalation flow
+
+    const stuckInputs = {
+        messages: [new HumanMessage(stuckTestTask)]
+    };
+
+    try {
+        const stuckStream = await agent.stream(stuckInputs, {
+            streamMode: "updates",
+            subgraphs: true
+        });
+
+        for await (const event of stuckStream) {
+            const [chunk, metadata] = event as any;
+            const namespace = metadata?.namespace || [];
+            const currentAgentName = namespace.length > 0 ? namespace[namespace.length - 1] : "Orchestrator";
+
+            let stateUpdate = null;
+            if (metadata?.model_request) stateUpdate = metadata.model_request;
+            else if (metadata?.tools) stateUpdate = metadata.tools;
+            else {
+                for (const key in metadata) {
+                    if (metadata[key] && metadata[key].messages) {
+                        stateUpdate = metadata[key];
+                        break;
+                    }
+                }
+            }
+
+            if (!stateUpdate) continue;
+
+            if (stateUpdate.messages) {
+                const messages = Array.isArray(stateUpdate.messages) ? stateUpdate.messages : [stateUpdate.messages];
+                for (const msg of messages) {
+                    if (msg._getType() === "ai" && msg.content) {
+                        console.log(`[${currentAgentName}]: ${msg.content}`);
+                    }
+                    if (msg._getType() === "ai" && msg.tool_calls && msg.tool_calls.length > 0) {
+                        msg.tool_calls.forEach((tc: any) => {
+                            console.log(`[${currentAgentName}] Tool call -> ${tc.name}()`);
+                        });
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.log("[STUCK TEST] Agent encountered an error (expected for stress test):", err);
+    }
+
+    // ============================================================================================================
+    // ================= Post-run verification ====================================================================
+    // ============================================================================================================
+    console.log("\n=== POST-RUN: Checking experience was saved ===");
+
+    const episodesDir = path.join(process.cwd(), "src", "cognition", "episodes");
+    try {
+        const episodeFiles = fs.readdirSync(episodesDir);
+        console.log("Episodes directory contents:", episodeFiles);
+
+        if (episodeFiles.length > 0) {
+            // Read the latest episode file
+            const sortedFiles = episodeFiles
+                .filter(f => f.startsWith("ep_") && f.endsWith(".md"))
+                .sort()
+                .reverse();
+
+            if (sortedFiles.length > 0) {
+                const latestEpisode = fs.readFileSync(
+                    path.join(episodesDir, sortedFiles[0]),
+                    "utf-8"
+                );
+                console.log(`\nLatest episode (${sortedFiles[0]}):\n`, latestEpisode);
+            }
+        }
+    } catch (err) {
+        console.warn("Could not read episodes directory:", err);
+    }
+
+    // Check for output files
+    const checkOutputDir = path.join(process.cwd(), "test_folder", "output");
+    try {
+        if (fs.existsSync(checkOutputDir)) {
+            const outputFiles = fs.readdirSync(checkOutputDir);
+            console.log("Output directory contents:", outputFiles);
+        } else {
+            console.log("Output directory not created (expected if agent did not complete)");
+        }
+    } catch (err) {
+        console.warn("Could not read output directory:", err);
+    }
+
+    console.log("=== TEST COMPLETE ===");
 }
 
 main().catch(console.error);

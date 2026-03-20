@@ -64,11 +64,7 @@ import type { BackendProtocol, BackendFactory } from "../backends/protocol.js";
 import type { StateBackend } from "../backends/state.js";
 import type { BaseStore } from "@langchain/langgraph-checkpoint";
 
-// [COGNITION-EXPERIENCE-WRITER] START — added by cognition system refactor
-import * as fsPromises from "fs/promises";
-import * as pathModule from "path";
-import { CognitionLoader } from "../cognition/loader.js";
-// [COGNITION-EXPERIENCE-WRITER] END
+// [COGNITION-EXPERIENCE-WRITER] REMOVED in v2 — experience saving moved to VerifyMiddleware
 
 // Re-export the base summarization middleware from langchain for users who don't need backend offloading
 export { summarizationMiddleware } from "langchain";
@@ -166,162 +162,7 @@ export interface SummarizationMiddlewareOptions {
   truncateArgsSettings?: TruncateArgsSettings;
 }
 
-// [COGNITION-EXPERIENCE-WRITER] START — added by cognition system refactor
-
-/**
- * Common stop words to exclude from keyword extraction.
- */
-const STOP_WORDS = new Set([
-  "the", "a", "an", "is", "are", "was", "for", "to", "in", "of",
-  "with", "and", "or", "that", "this", "it", "on", "at", "by", "from",
-  "be", "has", "have", "had", "do", "does", "did", "will", "would",
-  "can", "could", "should", "may", "might", "not", "no", "but", "if",
-  "then", "than", "so", "as", "up", "out", "about", "into",
-]);
-
-/**
- * Extract keywords from a task description.
- * Removes stop words and returns the first 5 significant words.
- */
-function extractKeywords(taskDescription: string): string[] {
-  const words = taskDescription
-    .toLowerCase()
-    .replace(/[^a-z0-9\s_-]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
-
-  return Array.from(new Set(words)).slice(0, 5);
-}
-
-/**
- * Get the next episode number by scanning the episodes directory.
- */
-async function getNextEpisodeNumber(): Promise<number> {
-  const episodesDir = pathModule.join(CognitionLoader.COGNITION_DIR, "episodes");
-
-  try {
-    await fsPromises.mkdir(episodesDir, { recursive: true });
-    const files = await fsPromises.readdir(episodesDir);
-    let maxNum = 0;
-    for (const file of files) {
-      const match = /^ep_(\d+)\.md$/.exec(file);
-      if (match) {
-        const num = parseInt(match[1], 10);
-        if (num > maxNum) maxNum = num;
-      }
-    }
-    return maxNum + 1;
-  } catch {
-    return 1;
-  }
-}
-
-/**
- * Write an experience episode after task completion.
- *
- * @param taskDescription - The original task/user request
- * @param toolsUsed - List of tool names called during the task
- * @param outcome - Task outcome: "good", "partial", or "failed"
- * @param keyInsights - Summary of what happened
- */
-async function writeExperienceEpisode(
-  taskDescription: string,
-  toolsUsed: string[],
-  outcome: "good" | "partial" | "failed",
-  keyInsights: string,
-): Promise<string | null> {
-  try {
-    const episodeNum = await getNextEpisodeNumber();
-    const paddedNum = String(episodeNum).padStart(3, "0");
-    const episodeFilename = `ep_${paddedNum}.md`;
-    const episodePath = pathModule.join(
-      CognitionLoader.COGNITION_DIR,
-      "episodes",
-      episodeFilename,
-    );
-
-    const keywords = extractKeywords(taskDescription);
-    const taskType = keywords.slice(0, 2).join("_") || "general";
-    const isoDate = new Date().toISOString().split("T")[0];
-
-    const toolsList = toolsUsed.length > 0
-      ? toolsUsed.map((t) => `- ${t}`).join("\n")
-      : "- (none recorded)";
-
-    let reuseAdvice: string;
-    if (outcome === "good") {
-      reuseAdvice = "Approach worked — consider reusing for similar tasks";
-    } else if (outcome === "partial") {
-      reuseAdvice = "Partially effective — review before reusing";
-    } else {
-      reuseAdvice = "Approach did not work — avoid repeating";
-    }
-
-    const episodeContent = `# Episode ep_${paddedNum}
-date: ${isoDate}
-task_type: ${taskType}
-keywords: ${keywords.join(", ")}
-outcome: ${outcome}
-
-## Situation
-${taskDescription}
-
-## Tools used
-${toolsList}
-
-## Outcome summary
-${keyInsights}
-
-## What to reuse
-${reuseAdvice}
-`;
-
-    await fsPromises.writeFile(episodePath, episodeContent, "utf-8");
-
-    // Update EXPERIENCE_INDEX.md
-    try {
-      const indexPath = pathModule.join(
-        CognitionLoader.COGNITION_DIR,
-        "EXPERIENCE_INDEX.md",
-      );
-      const indexContent = await fsPromises.readFile(indexPath, "utf-8");
-      const newRow = `${keywords.join(",")} | episodes/${episodeFilename} | ${outcome} | medium`;
-
-      // Insert new row before the "## How to use" section if it exists
-      const howToUseIdx = indexContent.indexOf("## How to use");
-      let updatedIndex: string;
-      if (howToUseIdx > 0) {
-        updatedIndex =
-          indexContent.substring(0, howToUseIdx).trimEnd() +
-          "\n" +
-          newRow +
-          "\n\n" +
-          indexContent.substring(howToUseIdx);
-      } else {
-        updatedIndex = indexContent.trimEnd() + "\n" + newRow + "\n";
-      }
-
-      await fsPromises.writeFile(indexPath, updatedIndex, "utf-8");
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[ExperienceWriter] Failed to update EXPERIENCE_INDEX.md:",
-        err instanceof Error ? err.message : err,
-      );
-    }
-
-    return episodeFilename;
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[ExperienceWriter] Failed to write experience episode:",
-      err instanceof Error ? err.message : err,
-    );
-    return null;
-  }
-}
-
-// [COGNITION-EXPERIENCE-WRITER] END
+// [COGNITION-EXPERIENCE-WRITER] REMOVED in v2 — all experience writing logic moved to VerifyMiddleware
 
 // Default values
 const DEFAULT_MESSAGES_TO_KEEP = 20;
@@ -1323,57 +1164,7 @@ ${summary}
       await handler({ ...request, messages: modifiedMessages });
     }
 
-    // [COGNITION-EXPERIENCE-WRITER] START — write experience episode after summarization
-    try {
-      // Extract task description from the first human message
-      const firstHumanMsg = truncatedMessages.find((m) =>
-        HumanMessage.isInstance(m) && !isSummaryMessage(m),
-      );
-      const taskDescription =
-        firstHumanMsg && typeof firstHumanMsg.content === "string"
-          ? firstHumanMsg.content
-          : "Unknown task";
-
-      // Extract tool names used during the conversation
-      const toolsUsed: string[] = [];
-      for (const msg of truncatedMessages) {
-        if (AIMessage.isInstance(msg) && msg.tool_calls) {
-          for (const tc of msg.tool_calls) {
-            if (tc.name && !toolsUsed.includes(tc.name)) {
-              toolsUsed.push(tc.name);
-            }
-          }
-        }
-      }
-
-      // Determine outcome from verification result in state, or default to "partial"
-      const verificationResult = request.state?.verificationResult as
-        | { status: "pass" | "fail"; reason: string }
-        | undefined;
-      let outcome: "good" | "partial" | "failed" = "partial";
-      if (verificationResult?.status === "pass") outcome = "good";
-      else if (verificationResult?.status === "fail") outcome = "failed";
-
-      // Use the summary content as key insights
-      const summaryContent =
-        typeof finalSummaryMessage.content === "string"
-          ? finalSummaryMessage.content
-          : "Task completed (summary not available as text)";
-
-      await writeExperienceEpisode(
-        taskDescription,
-        toolsUsed,
-        outcome,
-        summaryContent,
-      );
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[SummarizationMiddleware] Experience episode writing failed (non-fatal):",
-        err instanceof Error ? err.message : err,
-      );
-    }
-    // [COGNITION-EXPERIENCE-WRITER] END
+    // [COGNITION-EXPERIENCE-WRITER] REMOVED in v2 — experience saving moved to VerifyMiddleware
 
     return new Command({
       update: {

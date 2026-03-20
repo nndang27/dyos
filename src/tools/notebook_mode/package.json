@@ -1,0 +1,22 @@
+{
+    "name": "notebook_mode",
+    "version": "1.0.0",
+    "description": "Stateful Python Notebook execution for NanoClaw",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "type": "module",
+    "scripts": {
+        "build": "tsc"
+    },
+    "dependencies": {
+        "axios": "^1.6.8",
+        "uuid": "^9.0.1",
+        "ws": "^8.16.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.24",
+        "@types/uuid": "^9.0.8",
+        "@types/ws": "^8.5.10",
+        "typescript": "^5.4.2"
+    }
+}

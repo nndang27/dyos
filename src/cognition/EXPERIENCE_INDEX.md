@@ -8,6 +8,8 @@ funnel,drop-off,mobile | episodes/ep_023.md | good | high
 stakeholder,conflicting_metrics | episodes/ep_031.md | good | medium
 data_quality,missing_data,imputation | episodes/ep_015.md | good | high
 dashboard,exec_review,rejected | episodes/ep_028.md | bad | high
+need,complete,analysis,our,sales | episodes/ep_024.md | failed | medium
+convert,csv,data,32130_2026a_10,formatted | episodes/ep_025.md | failed | medium
 
 ## How to use this index
 1. Scan task description for matching keywords
